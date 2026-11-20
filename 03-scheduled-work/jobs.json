@@ -1,0 +1,18 @@
+{
+  "jobs": [
+    {
+      "cron": "0 9 * * *",
+      "description": "Daily health check of the quote service (the 01 team's demo app).",
+      "interval_seconds": 86400,
+      "name": "quote-service-check",
+      "task": "Check the quote service is healthy: verify GET /quote returns 200 with quote and author keys, and GET /quote/nvidia returns only Nvidia quotes. Report any failures."
+    },
+    {
+      "cron": "0 9 * * 1",
+      "description": "Weekly research roundup: what changed in free quote APIs.",
+      "interval_seconds": 604800,
+      "name": "research-roundup",
+      "task": "Research the latest options for free quote APIs, compare them, and write a short roundup of what changed this week."
+    }
+  ]
+}

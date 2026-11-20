@@ -1,0 +1,74 @@
+[
+  {
+    "checks": [
+      {
+        "text": "FastAPI",
+        "type": "contains"
+      },
+      {
+        "text": "/quote",
+        "type": "contains"
+      },
+      {
+        "text": "Nvidia",
+        "type": "contains"
+      },
+      {
+        "text": "TODO",
+        "type": "not_contains"
+      }
+    ],
+    "id": "build-quote-service",
+    "task": "Build a fastapi service with a random quote about nvidia"
+  },
+  {
+    "checks": [
+      {
+        "text": "random quote",
+        "type": "contains"
+      },
+      {
+        "text": "README",
+        "type": "contains"
+      },
+      {
+        "pattern": "GET /quote(/nvidia)?",
+        "type": "regex"
+      }
+    ],
+    "id": "research-build-readme",
+    "task": "Research the best free quote API, build a fastapi service with a random quote about nvidia, and write a README for it"
+  },
+  {
+    "checks": [
+      {
+        "text": "200",
+        "type": "contains"
+      },
+      {
+        "text": "503",
+        "type": "contains"
+      },
+      {
+        "text": "quote+author",
+        "type": "contains"
+      }
+    ],
+    "id": "test-quote-service",
+    "task": "Test the quote service and check the edge cases"
+  },
+  {
+    "checks": [
+      {
+        "text": "caching",
+        "type": "contains"
+      },
+      {
+        "text": "rate limiting",
+        "type": "contains"
+      }
+    ],
+    "id": "review-quote-service",
+    "task": "Review the quote service for risks and quality"
+  }
+]
