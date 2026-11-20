@@ -1,0 +1,8 @@
+# Pinned to the versions this demo was verified against (2026-11-20).
+# The MCP Apps extension (`mcp.server.apps`) needs mcp >= 2.3.0.
+mcp==2.3.0
+anyio==4.16.0
+# Pulled in by mcp; pinned so a fresh install matches the verified tree.
+pydantic==2.14.4
+starlette==1.10.0
+uvicorn==0.54.0

@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Risk Card</title>
+<style>
+  /* Dependency-free: no external fonts, scripts, or stylesheets, so the
+     iframe needs no CSP connect/resource domains at all. */
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: #f7f8fa;
+    color: #1a1d21;
+    padding: 16px;
+  }
+  .card {
+    max-width: 520px;
+    margin: 0 auto;
+    background: #fff;
+    border: 1px solid #dfe3e8;
+    border-radius: 12px;
+    padding: 20px 22px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+  }
+  .header { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; }
+  .badge {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #fff;
+    background: #6b7280;
+    border-radius: 999px;
+    padding: 3px 10px;
+  }
+  .badge.high { background: #c2410c; }
+  .badge.medium { background: #b45309; }
+  .badge.low { background: #15803d; }
+  .summary { font-size: 14px; line-height: 1.5; color: #374151; margin: 12px 0 0; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; margin: 18px 0 8px; }
+  ul { margin: 0; padding-left: 18px; }
+  li { font-size: 14px; line-height: 1.45; margin-bottom: 8px; }
+  li strong { display: block; }
+  li span { color: #4b5563; }
+  .sources { font-size: 12px; margin: 16px 0 0; padding: 0; list-style: none; }
+  .sources li { margin-bottom: 4px; word-break: break-all; }
+  .sources a { color: #2563eb; }
+  .waiting { color: #6b7280; font-size: 14px; text-align: center; padding: 32px 0; }
+  .error { color: #b91c1c; font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="card" id="card">
+  <p class="waiting" id="waiting">Waiting for the risk data…</p>
+</div>
+
+<script>
+  // Plain postMessage handling, following the official MCP Apps docs
+  // (the "clock" example). The host and the iframe speak JSON-RPC 2.0
+  // over postMessage; the server never sees any of this traffic.
+  //
+  // Why not the official @modelcontextprotocol/ext-apps browser SDK?
+  // It is an npm package: using it needs a bundler or a CDN fetch at
+  // render time, which breaks the "no build step, no network" goal of
+  // this demo file. The handshake below is the same protocol the SDK
+  // speaks, in ~40 lines. For a real app, use the SDK: it gives you
+  // ontoolresult, callServerTool, and getHostContext instead of this
+  // hand-rolled listener.
+  var parent = window.parent;
+  var initialized = false;
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c];
+    });
+  }
+
+  function renderCard(card) {
+    var level = String(card.risk_level || "Medium").toLowerCase();
+    var badgeClass = level === "high" ? "high" : level === "low" ? "low" : "medium";
+    var html = '<div class="header"><h1>' + esc(card.company || "Unknown") + '</h1>'
+      + '<span class="badge ' + badgeClass + '">' + esc(card.risk_level || "Medium") + ' risk</span></div>'
+      + '<p class="summary">' + esc(card.summary || "") + '</p>';
+    var risks = Array.isArray(card.risks) ? card.risks : [];
+    if (risks.length) {
+      html += "<h2>Top risks</h2><ul>";
+      risks.forEach(function (r) {
+        html += "<li><strong>" + esc(r.title || "") + "</strong><span>"
+          + esc(r.detail || "") + "</span></li>";
+      });
+      html += "</ul>";
+    }
+    var sources = Array.isArray(card.sources) ? card.sources : [];
+    if (sources.length) {
+      html += "<h2>Sources</h2><ul class=\"sources\">";
+      sources.forEach(function (u) {
+        html += '<li><a href="' + esc(u) + '" target="_blank" rel="noopener">'
+          + esc(u) + "</a></li>";
+      });
+      html += "</ul>";
+    }
+    document.getElementById("card").innerHTML = html;
+  }
+
+  // The tool result arrives as params.content (an array of blocks).
+  // Our server sends one text block holding the risk JSON. If a block
+  // is not JSON, fall back to showing it as plain text.
+  function handleToolResult(params) {
+    var blocks = (params && params.content) || [];
+    for (var i = 0; i < blocks.length; i++) {
+      var text = blocks[i] && blocks[i].text;
+      if (typeof text !== "string") continue;
+      try {
+        var data = JSON.parse(text);
+        if (data && typeof data === "object" && data.company) {
+          renderCard(data);
+          return;
+        }
+      } catch (e) { /* not JSON — keep looking */ }
+    }
+    // No JSON block: show the first text block as a plain summary.
+    for (var j = 0; j < blocks.length; j++) {
+      var t = blocks[j] && blocks[j].text;
+      if (typeof t === "string") {
+        document.getElementById("card").innerHTML =
+          '<p class="summary">' + esc(t) + "</p>";
+        return;
+      }
+    }
+    document.getElementById("card").innerHTML =
+      '<p class="error">Got a tool result with no readable content.</p>';
+  }
+
+  window.addEventListener("message", function (event) {
+    if (event.source !== parent || !event.data || event.data.jsonrpc !== "2.0") return;
+
+    // Step 2 of the handshake: the host answered our ui/initialize.
+    if (event.data.id === 1 && event.data.result && event.data.result.protocolVersion) {
+      parent.postMessage({jsonrpc: "2.0", method: "ui/notifications/initialized"}, "*");
+      initialized = true;
+      return;
+    }
+
+    if (!initialized) return;
+    if (event.data.method === "ui/notifications/tool-result") {
+      handleToolResult(event.data.params || {});
+    }
+  });
+
+  // Step 1 of the handshake: introduce the app to the host.
+  parent.postMessage({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "ui/initialize",
+    params: {
+      appInfo: {name: "risk-card", version: "1.0.0"},
+      appCapabilities: {},
+      protocolVersion: "2026-01-26"
+    }
+  }, "*");
+</script>
+</body>
+</html>
