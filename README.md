@@ -1,6 +1,6 @@
 # foundry-team-tutorial
 
-Five things to build around Azure AI Foundry agents, each in its own
+Six things to build around Azure AI Foundry agents, each in its own
 folder. Each folder is self-contained: working code, a tutorial README
 that teaches it code-first, plain-script tests, and a demo that runs
 with no Azure needed.
@@ -15,6 +15,7 @@ it, but runs on its own.
 | `03-scheduled-work/` | Scheduled work: Foundry Routines — one trigger + one agent per routine, dispatch on demand, run history kept by Foundry. |
 | `04-evaluation/` | Evaluation: a task suite with checks, a runner that scores the team, results recorded over time, and a comparison that shows what changed between two runs. |
 | `05-foundry-config/` | Config as code: the whole setup — project, agents, memory, routines, Teams triggers, MCP tools — in one `foundry.yaml`, plus a provisioner CLI that creates it all, a manual portal guide, and the missing parent/child piece (the Leader as a real Foundry agent, via an Agent Framework sequential workflow or A2A). |
+| `06-chat-ui/` | A generic chat UI: React + CopilotKit talking directly to a FastAPI agent server over AG-UI (no Node runtime — FastAPI is the runtime), with a registry for your own React components the agent can trigger (RiskCard example). |
 
 ## Prerequisites
 
@@ -42,6 +43,8 @@ cd ../02-memory && python3 demo.py                           # memory service, t
 cd ../03-scheduled-work && python3 demo.py                  # routines, fake service
 cd ../04-evaluation && python3 demo.py                      # baseline, degraded, compare
 cd ../05-foundry-config && python3 demo.py                  # config, plan + apply to fake
+cd ../06-chat-ui/agent && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/uvicorn server:app --port 8000  # agent server, demo mode
+# then in another terminal: cd ../frontend && npm install && npm run dev  # chat UI on http://localhost:5173
 ```
 
 ## Run each test suite
@@ -52,9 +55,11 @@ cd ../02-memory && python3 tests/test_memory.py              # 38 tests
 cd ../03-scheduled-work && python3 tests/test_routines.py   # 46 tests
 cd ../04-evaluation && python3 tests/test_evaluation.py      # 22 tests
 cd ../05-foundry-config && python3 -m unittest discover -s tests -v  # 40 tests
+cd ../06-chat-ui/agent && python3 test_wiring.py             # wiring check: tool output matches the RiskCard contract
 ```
 
-159 tests total, all plain scripts, no pytest.
+159 tests total, all plain scripts, no pytest. (06's check is a
+wiring check, not part of the 159.)
 
 ## What this repo is not
 
@@ -68,7 +73,7 @@ cd ../05-foundry-config && python3 -m unittest discover -s tests -v  # 40 tests
 - No auth beyond a Bearer token in v1. Entra ID / managed identity
   is the production path, documented in `01`, not wired in.
 
-## The five features, in one line each
+## The six features, in one line each
 
 1. **Team** — one Leader, five specialists, each a separate Foundry
    agent with its own instructions and tools.
@@ -82,3 +87,6 @@ cd ../05-foundry-config && python3 -m unittest discover -s tests -v  # 40 tests
 5. **Config as code** — the whole setup in one YAML file and a
    provisioner that rebuilds it, with the Leader as a real Foundry
    agent (parent) delegating to the specialists (children).
+6. **Chat UI** — a generic chat UI for the team: the browser talks
+   straight to a FastAPI agent server over AG-UI, and the agent can
+   trigger your own React components instead of plain text.
