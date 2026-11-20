@@ -1,245 +1,189 @@
-"""Team memory — a SQLite store, per user, stdlib only.
+"""Managed memory — the Foundry Memory Service, per user.
 
-The idea: after a run, the specialists' replies are mined for lines
-that start with Decision: / Learned: / Best practice:. Those lines
-are the durable part of a run — everything else is working text.
-Next run, the stored lines are injected into the task prompt as
-additional instructions, so the team builds on what it already
-decided instead of re-deciding it.
+This replaces the hand-rolled SQLite store that used to live here.
+That version is in git history (commits c4dd80bd and 9b75a064 on
+revanthsamavedam/aG) if you want to see what the service replaces:
+a local table, a regex extractor, and keyword search. The service
+now owns all three — storage, extraction, consolidation, retrieval —
+and this module is a thin wrapper that speaks its API.
 
-Memory is per user. Every row carries a user_id, and every read
-filters on (team_id, user_id) — no query ever reads memory without
-a user, so one user's decisions never leak into another user's run.
-That is the access-control rule, enforced in the store itself, not
-left to the caller. The managed Foundry Memory Service is per-user
-by the same shape; this is the hand-rolled version of that rule.
+The service, in one paragraph (Microsoft Learn, "Create and use
+memory in Foundry Agent Service", Memory is in public preview):
+a memory store is a managed, long-term store attached to an agent.
+You create one store per agent, then the service extracts what
+matters from conversation content, consolidates duplicates, and
+retrieves the relevant memories when asked. It is backed by Cosmos
+DB. The Python SDK is azure-ai-projects (>= 2.3.0); every call below
+goes through ``project_client.beta.memory_stores``.
 
-One table:
+The per-user rule survives the move, and it is the service's own
+shape, not ours: every call carries a ``scope``, and the scope IS
+the user id. Each scope keeps an isolated collection of memory
+items, so one user's memories are never returned for another user.
+When the memory search tool is attached to an agent instead, the
+same isolation is ``scope="{{$userId}}"`` plus an
+``x-memory-user-id`` header on each response call (or the caller's
+Entra identity as a fallback). The low-level APIs used here take
+the scope explicitly on every call.
 
-    entries(id, team_id, user_id, kind, member, text, created_at)
-      kind: "decision" | "learning" | "best_practice"
+What changed vs the SQLite version:
+  * No local file. The store lives in Foundry (Cosmos DB under it).
+  * No regex extractor. You hand the service the raw reply text;
+    it extracts the facts. The fake service in fake_memory.py
+    extracts Decision:/Learned:/Best practice: lines so the demo
+    stays deterministic — that is the fake's stand-in for the
+    service's LLM extraction, not what the real service does.
+  * No dump-all recall. The service retrieves by relevance to a
+    query, so build_memory_context() searches with the task text
+    and injects only the memories relevant to this task. That is
+    also how the service is meant to be used: contextual memories
+    are retrieved per turn, based on the latest messages.
+  * No member attribution. The service stores content, not our
+    member handle, so the injected block lists memories without
+    an (@dev) tag. The SQLite version kept the handle.
+  * No clear(). Deleting individual memories is a separate
+    memory-items API the wrapper does not cover; use the portal
+    or the items API for that.
 
-No embeddings, no vector search in v1: recall() is keyword match on
-the query, newest first. That is enough to teach the shape; a real
-retriever can replace recall() later without touching the rest.
+Real run: FOUNDRY_PROJECT_ENDPOINT plus the chat and embedding
+model deployment names, then connect_from_env(). Auth is
+DefaultAzureCredential (Entra) — the production path. The module
+imports with no Azure SDK installed; the SDK import happens inside
+connect_from_env(), so tests and the demo (fake) never need it.
 """
 from __future__ import annotations
 
-import re
-import sqlite3
-from datetime import datetime, timezone
+import os
 
-# Prefix (as written in a reply) -> kind stored in the DB.
-# Matched case-insensitively, leading whitespace allowed.
-_PREFIXES = {
-    "decision:": "decision",
-    "learned:": "learning",
-    "best practice:": "best_practice",
-}
-
-_KIND_LABEL = {
-    "decision": "Decisions",
-    "learning": "Learnings",
-    "best_practice": "Best practices",
-}
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS entries (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    team_id    TEXT NOT NULL,
-    user_id    TEXT NOT NULL,
-    kind       TEXT NOT NULL,
-    member     TEXT NOT NULL,
-    text       TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_entries_team_user
-    ON entries (team_id, user_id, id);
-"""
+# The message item shape the service takes for update and search
+# (Learn doc, "Add memories" / "Search for memories" samples).
+# A plain dict is what the SDK accepts for items.
+def _message_item(text: str) -> dict:
+    return {"role": "user", "content": text, "type": "message"}
 
 
-class MemoryStore:
-    """SQLite-backed memory for one or more teams and users.
+class ManagedMemoryStore:
+    """One Foundry memory store — one team, many users.
 
-    Pass a path for a persistent store, or ":memory:" (the default)
-    for tests and the demo's throwaway runs. The demo passes an
-    explicit file path so you can inspect it after the run.
-
-    Every method takes a user_id. There is no way to read or write
-    memory without one — that is the per-user rule, enforced here.
+    ``memory_stores`` is the operations object, duck-typed so the
+    fake can stand in: the real one is
+    ``project_client.beta.memory_stores`` (azure-ai-projects), the
+    fake is ``FakeMemoryStores`` from fake_memory.py. ``store_name``
+    is the team id (one dedicated store per agent, per the docs).
+    ``definition`` is passed straight to create(): the real path
+    supplies a MemoryStoreDefaultDefinition, the fake takes a dict.
     """
 
-    def __init__(self, path: str = ":memory:"):
-        self.path = path
-        self.conn = sqlite3.connect(path)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(SCHEMA)
-        self._migrate_user_id()
-        self.conn.commit()
+    def __init__(self, memory_stores, store_name: str, definition=None):
+        self.memory_stores = memory_stores
+        self.store_name = store_name
+        self.definition = definition
 
-    def _migrate_user_id(self) -> None:
-        """Add user_id to stores created before per-user memory.
+    def ensure_store(self):
+        """Return the store, creating it first if it does not exist.
 
-        The v1 schema had no user_id column. An old demo DB
-        (team_memory.db from before this change) gets the column
-        added here; its old rows keep user_id '' and are never
-        returned, because every read filters on a real user_id.
+        Create needs a definition (chat + embedding model). The real
+        path gets one from connect_from_env(); without it, this
+        raises a clear error instead of failing inside the SDK.
         """
-        cols = [r[1] for r in self.conn.execute(
-            "PRAGMA table_info(entries)").fetchall()]
-        if cols and "user_id" not in cols:
-            self.conn.execute(
-                "ALTER TABLE entries ADD COLUMN user_id TEXT NOT NULL DEFAULT ''")
+        try:
+            return self.memory_stores.get(self.store_name)
+        except Exception:  # noqa: BLE001 — any "not found" means create
+            pass
+        if self.definition is None:
+            raise ValueError(
+                f"memory store {self.store_name!r} does not exist and no "
+                "definition was given — pass chat_model/embedding_model "
+                "via connect_from_env() so the store can be created.")
+        return self.memory_stores.create(
+            name=self.store_name,
+            definition=self.definition,
+            description=f"Memory store for team {self.store_name}")
 
-    # -- recording ------------------------------------------------------
-    def record_from_reply(self, team_id: str, user_id: str, member: str,
-                          text: str) -> list[dict]:
-        """Parse Decision:/Learned:/Best practice: lines out of one
-        agent reply and store them under (team_id, user_id).
-        Returns the entries recorded.
+    def record(self, user_id: str, text: str, update_delay: int = 0) -> list[dict]:
+        """Hand one reply to the service for extraction.
 
-        Extraction rules (v1, deliberately strict):
-          * Only lines starting with one of the three prefixes count,
-            and the prefix must be followed by a space — "Decision:
-            use X" counts, "Decision:use X" does not.
-          * The prefix match is case-insensitive; the value is the
-            rest of the line, stripped. Empty values are dropped.
-          * Every other line is ignored — no guessing, no LLM call.
-          * One line = one entry. A reply with no prefixed lines
-            records nothing.
+        The service preprocesses and postprocesses the content —
+        extraction and consolidation — which takes about a minute
+        on the real service, so begin_update_memories is a
+        long-running operation: we wait for the poller here and
+        return the operations it performed, as plain dicts:
+        {"kind", "memory_id", "content"}. ``scope`` is the user id;
+        that is the per-user rule, enforced on every call.
+        ``update_delay=0`` triggers the update immediately instead
+        of waiting for inactivity (the docs use 0 in samples; the
+        production default is 300 seconds).
         """
-        recorded = []
-        for line in (text or "").splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            low = stripped.lower()
-            for prefix, kind in _PREFIXES.items():
-                if low.startswith(prefix):
-                    rest = stripped[len(prefix):]
-                    if rest and rest[0].isspace():
-                        value = rest.strip()
-                        if value:
-                            recorded.append(self._insert(
-                                team_id, user_id, kind, member, value))
-                    break
-        return recorded
+        poller = self.memory_stores.begin_update_memories(
+            name=self.store_name,
+            scope=user_id,
+            items=[_message_item(text)],
+            update_delay=update_delay,
+        )
+        result = poller.result()
+        return [{"kind": str(op.kind),
+                 "memory_id": op.memory_item.memory_id,
+                 "content": op.memory_item.content}
+                for op in result.memory_operations]
 
-    def _insert(self, team_id: str, user_id: str, kind: str, member: str,
-                text: str) -> dict:
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        cur = self.conn.execute(
-            "INSERT INTO entries (team_id, user_id, kind, member, text, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (team_id, user_id, kind, member, text, now))
-        self.conn.commit()
-        return {"id": cur.lastrowid, "team_id": team_id, "user_id": user_id,
-                "kind": kind, "member": member, "text": text,
-                "created_at": now}
+    def recall(self, user_id: str, query: str, limit: int = 5) -> list[dict]:
+        """Memories relevant to ``query``, for this user only.
 
-    # -- reading ---------------------------------------------------------
-    def recall(self, team_id: str, user_id: str, query: str | None = None,
-               limit: int = 10) -> list[dict]:
-        """Relevant entries for one user on one team, newest first.
-
-        No query -> the most recent entries. With a query -> entries
-        whose text contains any of the query's words (case-insensitive
-        substring match; v1 keyword search, no ranking beyond recency).
-        Another user's entries are never returned.
+        search_memories is semantic on the real service; the fake
+        does keyword match. Either way the scope is the user id, so
+        another user's memories are never returned. Returns plain
+        dicts: {"memory_id", "content"}.
         """
-        if query:
-            words = [w for w in re.split(r"\W+", query.lower()) if w]
-            if not words:
-                return []
-            conds = " OR ".join("LOWER(text) LIKE ?" for _ in words)
-            params: list = [f"%{w}%" for w in words]
-            rows = self.conn.execute(
-                f"SELECT * FROM entries WHERE team_id = ? AND user_id = ?"
-                f" AND ({conds}) ORDER BY id DESC LIMIT ?",
-                [team_id, user_id, *params, limit]).fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT * FROM entries WHERE team_id = ? AND user_id = ?"
-                " ORDER BY id DESC LIMIT ?",
-                (team_id, user_id, limit)).fetchall()
-        return [dict(r) for r in rows]
-
-    def list_entries(self, team_id: str, user_id: str, kind: str | None = None,
-                     limit: int | None = None) -> list[dict]:
-        """All entries for one user on one team (newest first),
-        optionally one kind."""
-        sql = "SELECT * FROM entries WHERE team_id = ? AND user_id = ?"
-        params: list = [team_id, user_id]
-        if kind:
-            sql += " AND kind = ?"
-            params.append(kind)
-        sql += " ORDER BY id DESC"
-        if limit is not None:
-            sql += " LIMIT ?"
-            params.append(limit)
-        return [dict(r) for r in
-                self.conn.execute(sql, params).fetchall()]
-
-    def clear(self, team_id: str, user_id: str, kind: str | None = None) -> int:
-        """Delete one user's entries on one team (optionally one
-        kind). Returns how many were deleted. The table itself
-        stays — clearing memory is not the same as dropping the
-        store. Another user's entries are untouched."""
-        sql = "DELETE FROM entries WHERE team_id = ? AND user_id = ?"
-        params: list = [team_id, user_id]
-        if kind:
-            sql += " AND kind = ?"
-            params.append(kind)
-        cur = self.conn.execute(sql, params)
-        self.conn.commit()
-        return cur.rowcount
-
-    def close(self) -> None:
-        self.conn.close()
+        response = self.memory_stores.search_memories(
+            name=self.store_name,
+            scope=user_id,
+            items=[_message_item(query)],
+            options={"max_memories": limit},
+        )
+        return [{"memory_id": m.memory_item.memory_id,
+                 "content": m.memory_item.content}
+                for m in response.memories]
 
 
 # -- injection ----------------------------------------------------------
 
-def build_memory_context(store: MemoryStore, team_id: str, user_id: str,
-                         limit: int = 10) -> str:
-    """Format one user's recalled memory as a short prompt block.
+def build_memory_context(store: ManagedMemoryStore, user_id: str,
+                         task: str, limit: int = 5) -> str:
+    """Format one user's memories relevant to ``task`` as a prompt block.
 
-    Empty string when the user has no memory yet — the wrapper then
+    Empty string when nothing relevant is stored — the wrapper then
     injects nothing, so a first run behaves exactly like a
-    memory-less run. Grouped by kind so the Leader sees decisions,
-    learnings and best practices as three short lists, not one
-    long blob.
+    memory-less run. Unlike the SQLite version, this does not dump
+    every stored memory: it asks the service what is relevant to
+    this task, and injects only that.
     """
-    entries = store.recall(team_id, user_id, limit=limit)
-    if not entries:
+    memories = store.recall(user_id, task, limit=limit)
+    if not memories:
         return ""
-    lines = [f"[Memory for user '{user_id}' — from earlier runs, "
-             f"follow it unless the task says otherwise]"]
-    for kind in ("decision", "learning", "best_practice"):
-        group = [e for e in entries if e["kind"] == kind]
-        if not group:
-            continue
-        lines.append(f"{_KIND_LABEL[kind]}:")
-        for e in group:
-            lines.append(f"- {e['text']} (@{e['member']})")
+    lines = [f"[Memory for user '{user_id}' — relevant memories from "
+             f"earlier runs, follow them unless the task says otherwise]"]
+    for m in memories:
+        lines.append(f"- {m['content']}")
     return "\n".join(lines)
 
 
-def run_team_with_memory(team, task: str, store: MemoryStore,
-                         team_id: str, user_id: str) -> str:
+def run_team_with_memory(team, task: str, store: ManagedMemoryStore,
+                         user_id: str) -> str:
     """Run the team with one user's memory: inject, run, record.
 
-    1. build_memory_context() formats what this user already knows.
+    1. build_memory_context() asks the service for memories
+       relevant to this task, for this user.
     2. The block is prepended to the task prompt as additional
        instructions — the ONLY injection point. Team.run itself is
        untouched (vendored file, not modified).
-    3. After the run, every specialist reply in team.last_results is
-       mined for Decision:/Learned:/Best practice: lines and stored
-       under (team_id, user_id), so the next run for this user
-       remembers this one. Another user's memory is untouched.
+    3. After the run, every specialist reply in team.last_results
+       is handed to the service (record), which extracts and
+       stores what matters under this user's scope, so the next
+       run for this user remembers this one. Another user's memory
+       is untouched.
     Returns the team's final answer, same as Team.run.
     """
-    context = build_memory_context(store, team_id, user_id)
+    context = build_memory_context(store, user_id, task)
     prompt = task
     if context:
         prompt = (f"{context}\n\n"
@@ -248,10 +192,58 @@ def run_team_with_memory(team, task: str, store: MemoryStore,
     final = team.run(prompt)
     recorded = []
     for member, reply in team.last_results:
-        recorded.extend(
-            store.record_from_reply(team_id, user_id, member.handle, reply))
+        recorded.extend(store.record(user_id, reply))
     if recorded:
         team.print(f"🧠 Recorded {len(recorded)} memory entr"
                    f"{'y' if len(recorded) == 1 else 'ies'} "
-                   f"for user '{user_id}' on team '{team_id}'.")
+                   f"for user '{user_id}' (store '{store.store_name}').")
     return final
+
+
+# -- real connection ------------------------------------------------------
+
+def connect_from_env(store_name: str) -> ManagedMemoryStore:
+    """Build the real store from environment variables.
+
+    Needs FOUNDRY_PROJECT_ENDPOINT, plus
+    MEMORY_STORE_CHAT_MODEL_DEPLOYMENT_NAME and
+    MEMORY_STORE_EMBEDDING_MODEL_DEPLOYMENT_NAME (the models that
+    process memory content). Auth is DefaultAzureCredential
+    (Entra); the Learn doc covers key-based auth as the alternative
+    when roles are not feasible. Raises a clear error when a
+    variable is missing, before importing the SDK.
+    """
+    endpoint = os.environ.get("FOUNDRY_PROJECT_ENDPOINT")
+    chat_model = os.environ.get("MEMORY_STORE_CHAT_MODEL_DEPLOYMENT_NAME")
+    embedding_model = os.environ.get(
+        "MEMORY_STORE_EMBEDDING_MODEL_DEPLOYMENT_NAME")
+    missing = [name for name, value in (
+        ("FOUNDRY_PROJECT_ENDPOINT", endpoint),
+        ("MEMORY_STORE_CHAT_MODEL_DEPLOYMENT_NAME", chat_model),
+        ("MEMORY_STORE_EMBEDDING_MODEL_DEPLOYMENT_NAME", embedding_model),
+    ) if not value]
+    if missing:
+        raise RuntimeError(
+            "missing environment variables for the real Memory Service: "
+            + ", ".join(missing))
+
+    from azure.ai.projects import AIProjectClient
+    from azure.ai.projects.models import (
+        MemoryStoreDefaultDefinition, MemoryStoreDefaultOptions)
+    from azure.identity import DefaultAzureCredential
+
+    project_client = AIProjectClient(
+        endpoint=endpoint,
+        credential=DefaultAzureCredential(),
+    )
+    definition = MemoryStoreDefaultDefinition(
+        chat_model=chat_model,
+        embedding_model=embedding_model,
+        options=MemoryStoreDefaultOptions(
+            chat_summary_enabled=True,
+            user_profile_enabled=True,
+        ),
+    )
+    return ManagedMemoryStore(
+        project_client.beta.memory_stores, store_name,
+        definition=definition)

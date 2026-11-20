@@ -1,0 +1,20 @@
+{
+  "routines": [
+    {
+      "agent_name": "qa",
+      "cron_expression": "0 9 * * *",
+      "description": "Daily health check of the quote service (the 01 team's demo app).",
+      "name": "quote-service-check",
+      "prompt": "Check the quote service is healthy: verify GET /quote returns 200 with quote and author keys, and GET /quote/nvidia returns only Nvidia quotes. Report any failures.",
+      "time_zone": "America/New_York"
+    },
+    {
+      "agent_name": "researcher",
+      "cron_expression": "0 9 * * 1",
+      "description": "Weekly research roundup: what changed in free quote APIs.",
+      "name": "research-roundup",
+      "prompt": "Research the latest options for free quote APIs, compare them, and write a short roundup of what changed this week.",
+      "time_zone": "America/New_York"
+    }
+  ]
+}

@@ -8,9 +8,10 @@ order, so tests can check delegation order.
 
 Extension vs the vendored copy in 01-team-of-agents/ (and in
 ~/workspace/foundry-team/fake_client.py): each canned reply ends
-with Decision: / Learned: / Best practice: lines. memory.py's
-extraction only looks for those prefixes, so the demo needs them
-here — that is the ONLY change to the vendored file.
+with Decision: / Learned: / Best practice: lines. The fake memory
+service (fake_memory.py) extracts those prefixes as its stand-in
+for the real service's LLM extraction, so the demo has something
+to extract — that is the ONLY change to the vendored file.
 """
 from __future__ import annotations
 

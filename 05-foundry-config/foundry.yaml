@@ -1,0 +1,200 @@
+# foundry.yaml — the whole Foundry setup for the tutorial team, in one file.
+#
+# This is the config-as-code version of MANUAL.md. Every step you did by
+# hand in the portal is one section here. Run it with:
+#
+#   python provision.py --config foundry.yaml --plan     # show what it would do
+#   python provision.py --config foundry.yaml --apply    # actually do it
+#
+# Nothing in this file is a secret. The endpoint is public-ish (it is the
+# address of your project, not a key). The key comes from your login
+# (DefaultAzureCredential) when you run the provisioner — never put a
+# key in this file.
+#
+# Fill in `project.endpoint` with your own project's endpoint (portal:
+# your project -> Overview -> Endpoint), and `project.chat_model` with
+# the model deployment name you created (MANUAL.md step 1).
+
+project:
+  # Your Foundry project endpoint, from the portal (Overview).
+  endpoint: "https://your-account.services.ai.azure.com/api/projects/your-project"
+  # The model deployment every agent uses unless it overrides `model`.
+  chat_model: "gpt-5-mini"
+  # Embedding model for the memory store (MANUAL.md step 3).
+  embedding_model: "text-embedding-3-large"
+
+# -- Agents ----------------------------------------------------------------
+# Each agent is one specialist from 01-team-of-agents. The `model` line
+# is optional — without it the agent uses project.chat_model.
+agents:
+  - name: researcher
+    instructions: |
+      You are the Researcher. Find and compare options, cite sources,
+      and say plainly when you could not verify a claim. Never invent
+      a fact, a link, or a version number.
+    tools:
+      # Built-in web search (MANUAL.md step 7). No extra resource needed.
+      - type: web_search
+      # An OpenAPI tool: the agent can call an HTTP API described by
+      # this spec. Replace the URL with your own API.
+      - type: openapi
+        spec:
+          openapi: "3.0.0"
+          info:
+            title: "Team docs API"
+            version: "1.0.0"
+          servers:
+            - url: "https://docs.example.com"
+          paths:
+            /search:
+              get:
+                operationId: searchDocs
+                summary: "Search the team's internal docs"
+                parameters:
+                  - name: q
+                    in: query
+                    required: true
+                    schema:
+                      type: string
+                responses:
+                  "200":
+                    description: "Search results"
+                    content:
+                      application/json:
+                        schema:
+                          type: object
+
+  - name: dev
+    instructions: |
+      You are the Developer. Write small, working code with tests.
+      Say what you changed, what you did not change, and how to run it.
+    tools:
+      # MCP tools come from the mcp_servers section below, by label.
+      - type: mcp
+        server: playwright
+      # A function tool: the schema the agent sees. The function itself
+      # lives in the app that calls the agent (see MANUAL.md step 7) —
+      # Foundry declares the tool, your code implements it.
+      - type: function
+        name: lookup_issue
+        description: "Look up a GitHub issue by number."
+        parameters:
+          type: object
+          properties:
+            number:
+              type: integer
+              description: "The issue number."
+          required:
+            - number
+
+  - name: qa
+    instructions: |
+      You are the QA Engineer. Test the code, list what passes and what
+      fails, and name the exact failing case. Do not say "it works"
+      without running a check.
+
+  - name: writer
+    instructions: |
+      You are the Technical Writer. Write short, plain docs: what it
+      does, how to run it, and what can go wrong. No marketing words.
+
+  - name: reviewer
+    instructions: |
+      You are the Reviewer. Check the work for correctness, risk, and
+      missing tests. Approve only when the checks pass; otherwise list
+      exactly what must change.
+
+  # The Leader. In 01 this was a plain model call; here it is a real
+  # Foundry agent (the parent). Its instructions say how it plans and
+  # integrates, and the orchestration section below says who it
+  # delegates to. In a2a mode the provisioner adds one A2A tool per
+  # child automatically — do not list them here.
+  - name: leader
+    instructions: |
+      You are the Leader of a team of specialist agents. For each task,
+      plan at most 3 ordered steps, dependencies first (research before
+      building, building before testing). Delegate each step to one
+      specialist, in plan order, passing earlier results to later
+      steps. Then integrate the specialists' results into one final
+      answer: keep what each found, do not repeat their full text.
+
+# -- Memory ----------------------------------------------------------------
+# One memory store for the whole team, per user (MANUAL.md step 3).
+# attach_to: these agents get the memory search tool, so they can
+# remember a user across sessions. Scope is the user id — a user only
+# ever sees their own memories.
+memory:
+  store_name: "team-memory"
+  chat_model: "gpt-5-mini"
+  embedding_model: "text-embedding-3-large"
+  user_profile: true
+  chat_summary: true
+  attach_to:
+    - leader
+    - writer
+
+# -- Parent / child orchestration ------------------------------------------
+# The Leader (parent) delegates to the five specialists (children).
+# mode: "sequential" (the default) runs the children in a fixed order
+# with the Microsoft Agent Framework — see workflow.py, generated by
+# the provisioner. "a2a" makes the Leader a Foundry agent that calls
+# each child over the A2A protocol instead (more moving parts, model
+# picks the order). README.md explains the pick.
+# steps: the fixed order for sequential mode (at most 3, matching the
+# Leader's cap in 01). Change this list to change the workflow.
+orchestration:
+  mode: sequential
+  parent: leader
+  children:
+    - researcher
+    - dev
+    - qa
+    - writer
+    - reviewer
+  steps:
+    - researcher
+    - dev
+    - writer
+
+# -- Routines (schedules) ---------------------------------------------------
+# A routine is a schedule that lives in Foundry, not in Teams or in a
+# cron job on your machine. Foundry wakes the agent on the trigger.
+routines:
+  # Every weekday at 9am New York time, the Leader posts a standup
+  # summary. A schedule routine needs a prompt (what to run each time).
+  - name: daily-standup
+    agent: leader
+    prompt: "Summarise what the team finished yesterday and what is next, from memory."
+    trigger:
+      type: schedule
+      cron: "0 9 * * 1-5"
+      time_zone: "America/New_York"
+
+  # When a message lands in a Teams channel, the Writer drafts a reply
+  # summary. The trigger is an event, so no prompt — the incoming
+  # message becomes the agent's input.
+  # Prerequisite (MANUAL.md step 5): create the Teams connector
+  # connection named "teams-connection" first, then fill in group_id
+  # and channel_id (the Teams team and channel ids).
+  - name: teams-channel-summary
+    agent: writer
+    trigger:
+      type: teams
+      connection: "teams-connection"
+      group_id: "19:your-team-id@thread.tacv2"
+      channel_id: "19:your-channel-id@thread.tacv2"
+
+# -- MCP servers -------------------------------------------------------------
+# Remote MCP servers the agents can use. Agents reference a server by
+# label (see dev above). The provisioner does not create a server — it
+# is your own endpoint; the config just records where it is and which
+# tools the agent may call. Auth: the agent calls the URL with the
+# headers listed here (a key), or with the agent/project identity
+# when the server accepts Entra. See MANUAL.md step 6.
+mcp_servers:
+  - label: playwright
+    url: "https://your-playwright-mcp.example.com/mcp"
+    allowed_tools:
+      - browser_navigate
+      - browser_snapshot
+    require_approval: "never"
