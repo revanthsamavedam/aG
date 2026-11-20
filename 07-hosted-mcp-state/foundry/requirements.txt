@@ -1,0 +1,8 @@
+# Pinned to the versions verified against (2026-11-20).
+# azure-ai-projects 2.11.0 is the version in the 06 scaffold's venv;
+# every SDK call name in attach.py was read from that installed package.
+azure-ai-projects==2.11.0
+azure-identity==1.27.0
+# driver.py only (the FastAPI pause/resume sketch).
+fastapi==0.162.7
+uvicorn==0.54.0

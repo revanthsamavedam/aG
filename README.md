@@ -1,6 +1,6 @@
 # foundry-team-tutorial
 
-Six things to build around Azure AI Foundry agents, each in its own
+Seven things to build around Azure AI Foundry agents, each in its own
 folder. Each folder is self-contained: working code, a tutorial README
 that teaches it code-first, plain-script tests, and a demo that runs
 with no Azure needed.
@@ -16,6 +16,7 @@ it, but runs on its own.
 | `04-evaluation/` | Evaluation: a task suite with checks, a runner that scores the team, results recorded over time, and a comparison that shows what changed between two runs. |
 | `05-foundry-config/` | Config as code: the whole setup — project, agents, memory, routines, Teams triggers, MCP tools — in one `foundry.yaml`, plus a provisioner CLI that creates it all, a manual portal guide, and the missing parent/child piece (the Leader as a real Foundry agent, via an Agent Framework sequential workflow or A2A). |
 | `06-chat-ui/` | A generic chat UI: React + CopilotKit talking directly to a FastAPI agent server over AG-UI (no Node runtime — FastAPI is the runtime), with a registry for your own React components the agent can trigger (RiskCard example). |
+| `07-hosted-mcp-state/` | Two-way communication, end to end: a hosted MCP server with a case store and a state-setting `set_case_status` tool, attached to a hosted Foundry agent with approval on the writer, and a CaseCard in the UI (Approve / Deny / Set in review / Escalate) that answers the approval and changes the state. |
 
 ## Prerequisites
 

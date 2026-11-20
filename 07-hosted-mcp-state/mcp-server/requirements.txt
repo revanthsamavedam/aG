@@ -1,0 +1,9 @@
+# Pinned to the versions this demo was verified against (2026-11-20).
+# Same pins as the mcp-app example (mcp==2.3.0); in mcp 2.x FastMCP
+# was renamed to MCPServer (mcp.server.mcpserver).
+mcp==2.3.0
+anyio==4.16.0
+# Pulled in by mcp; pinned so a fresh install matches the verified tree.
+pydantic==2.14.4
+starlette==1.10.0
+uvicorn==0.54.0
