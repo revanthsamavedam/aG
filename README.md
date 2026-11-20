@@ -38,12 +38,12 @@ cd ../04-evaluation && python3 demo.py                      # baseline, degraded
 
 ```bash
 cd 01-team-of-agents && python3 tests/test_foundry_team.py  # 13 tests
-cd ../02-memory && python3 tests/test_memory.py              # 27 tests
+cd ../02-memory && python3 tests/test_memory.py              # 39 tests
 cd ../03-scheduled-work && python3 tests/test_scheduled.py  # 10 tests
 cd ../04-evaluation && python3 tests/test_evaluation.py      # 22 tests
 ```
 
-72 tests total, all plain scripts, no pytest.
+84 tests total, all plain scripts, no pytest.
 
 ## What this repo is not
 
